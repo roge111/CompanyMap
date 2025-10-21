@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Карта компаний</title>
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=77b8cc85-6e06-4d9d-8c65-b3a584f6150a&lang=ru_RU"></script>
+    <style>
+        #map {
+            width: 100%;
+            height: 600px;
+        }
+        .company-info {
+            padding: 10px;
+            max-width: 300px;
+        }
+        .balloon-content {
+            font-family: Arial, sans-serif;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Карта компаний</h1>
+    <div id="loading" class="loading">Загрузка карты и геокодирование адресов...</div>
+    <div id="map" style="display:none;"></div>
+
+    <script>
+        // Данные из Django - простой способ без JSON
+        var companies = [
+            {% for company in companies_info %}
+            {
+                name: {% if company.name %}"{{ company.name|escapejs }}"{% else %}null{% endif %},
+                address: {% if company.address %}"{{ company.address|escapejs }}"{% else %}null{% endif %},
+                city: {% if company.city %}"{{ company.city|escapejs }}"{% else %}null{% endif %},
+                country: {% if company.country %}"{{ company.country|escapejs }}"{% else %}null{% endif %},
+                region: {% if company.region %}"{{ company.region|escapejs }}"{% else %}null{% endif %}
+            }{% if not forloop.last %},{% endif %}
+            {% endfor %}
+        ];
+        
+        console.log('Загружено компаний:', companies.length);
+        console.log('Первая компания:', companies[0]);
+        
+        var geocodedCompanies = 0;
+        var totalCompanies = companies.length;
+        
+        ymaps.ready(init);
+
+        function init() {
+            console.log('Яндекс Карты загружены');
+            
+            var myMap = new ymaps.Map("map", {
+                center: [55.76, 37.64],
+                zoom: 10
+            });
+
+            var objectManager = new ymaps.ObjectManager({
+                clusterize: true,
+                gridSize: 32,
+                clusterDisableClickZoom: false
+            });
+
+            // Настройка внешнего вида
+            objectManager.clusters.options.set('preset', 'islands#invertedBlueClusterIcons');
+            objectManager.objects.options.set({
+                preset: 'islands#blueIcon',
+                balloonContentBodyLayout: ymaps.templateLayoutFactory.createClass(
+                    '<div class="balloon-content">$[properties.balloonContent]</div>'
+                )
+            });
+
+            myMap.geoObjects.add(objectManager);
+
+            // Функция геокодирования одного адреса
+            function geocodeCompany(company, index) {
+                // Собираем полный адрес из доступных полей - упрощаем
+                var addressParts = [];
+                if (company.address && company.address !== 'null') {
+                    // Очищаем адрес от непонятных символов
+                    var cleanAddress = company.address.replace(/лит[Н]/g, '').replace(/\s+/g, ' ').trim();
+                    addressParts.push(cleanAddress);
+                }
+                if (company.city && company.city !== 'null') addressParts.push(company.city);
+                
+                var fullAddress = addressParts.join(', ');
+                
+                console.log('Геокодируем компанию:', company.name, 'Адрес:', fullAddress);
+
+                if (!fullAddress || fullAddress.trim() === '' || fullAddress === 'null') {
+                    console.log('Нет адреса для компании:', company.name);
+                    geocodedCompanies++;
+                    checkCompletion();
+                    return;
+                }
+
+                // Добавляем таймаут для геокодирования
+                ymaps.geocode(fullAddress, { results: 1 })
+                    .then(function (res) {
+                        var firstGeoObject = res.geoObjects.get(0);
+                        
+                        if (firstGeoObject) {
+                            var coordinates = firstGeoObject.geometry.getCoordinates();
+                            console.log('Найдены координаты для', company.name, ':', coordinates);
+                            
+                            // Добавляем метку на карту
+                            objectManager.add({
+                                id: index,
+                                type: 'Feature',
+                                geometry: {
+                                    type: 'Point',
+                                    coordinates: coordinates
+                                },
+                                properties: {
+                                    balloonContent: 
+                                        '<div class="company-info">' +
+                                        '<h3>' + (company.name || 'Без названия') + '</h3>' +
+                                        (company.address ? '<p><strong>Адрес:</strong> ' + company.address + '</p>' : '') +
+                                        (company.city ? '<p><strong>Город:</strong> ' + company.city + '</p>' : '') +
+                                        (company.region ? '<p><strong>Регион:</strong> ' + company.region + '</p>' : '') +
+                                        (company.country ? '<p><strong>Страна:</strong> ' + company.country + '</p>' : '') +
+                                        '</div>',
+                                    hintContent: company.name || 'Компания'
+                                }
+                            });
+                        } else {
+                            console.log('Не удалось геокодировать адрес:', fullAddress);
+                            // Пробуем геокодировать только город
+                            if (company.city && company.city !== 'null') {
+                                ymaps.geocode(company.city, { results: 1 })
+                                    .then(function(cityRes) {
+                                        var cityGeoObject = cityRes.geoObjects.get(0);
+                                        if (cityGeoObject) {
+                                            var cityCoordinates = cityGeoObject.geometry.getCoordinates();
+                                            console.log('Используем координаты города для', company.name, ':', cityCoordinates);
+                                            
+                                            objectManager.add({
+                                                id: index + 1000, // другой ID чтобы не конфликтовать
+                                                type: 'Feature',
+                                                geometry: {
+                                                    type: 'Point',
+                                                    coordinates: cityCoordinates
+                                                },
+                                                properties: {
+                                                    balloonContent: 
+                                                        '<div class="company-info">' +
+                                                        '<h3>' + (company.name || 'Без названия') + '</h3>' +
+                                                        '<p><strong>Город:</strong> ' + company.city + '</p>' +
+                                                        '<p><em>Точный адрес не найден, показан центр города</em></p>' +
+                                                        '</div>',
+                                                    hintContent: company.name || 'Компания',
+                                                    preset: 'islands#orangeIcon' // другой цвет для приблизительного расположения
+                                                }
+                                            });
+                                        }
+                                    });
+                            }
+                        }
+                        
+                        geocodedCompanies++;
+                        checkCompletion();
+                        
+                    })
+                    .catch(function (error) {
+                        console.log('Ошибка геокодирования для компании:', company.name, 'Ошибка:', error);
+                        geocodedCompanies++;
+                        checkCompletion();
+                    });
+            }
+
+            // Проверка завершения геокодирования
+            function checkCompletion() {
+                console.log('Геокодировано:', geocodedCompanies, 'из', totalCompanies);
+                
+                if (geocodedCompanies >= totalCompanies) {
+                    // Скрываем индикатор загрузки и показываем карту
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('map').style.display = 'block';
+                    
+                    // Автоматически подбираем границы, если есть объекты
+                    if (objectManager.objects.getLength() > 0) {
+                        myMap.setBounds(objectManager.getBounds(), {
+                            checkZoomRange: true
+                        });
+                        console.log('Карта отцентрирована на', objectManager.objects.getLength(), 'объектах');
+                    } else {
+                        console.log('Нет объектов для отображения на карте');
+                        // Показываем карту России если нет объектов
+                        myMap.setCenter([55.76, 37.64], 5);
+                    }
+                }
+            }
+
+            // Запускаем геокодирование для всех компаний
+            companies.forEach(function(company, index) {
+                setTimeout(function() {
+                    geocodeCompany(company, index);
+                }, index * 200); // Увеличил задержку до 200мс
+            });
+        }
+    </script>
+</body>
+</html>
